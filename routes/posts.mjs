@@ -1,5 +1,6 @@
 import { Router } from "express";
 import pool from "../db.mjs";
+import validatePostBody from "../middleware/validatePostBody.mjs";
 
 const postsRouter = Router();
 
@@ -133,7 +134,40 @@ postsRouter.get("/:postId", async (req, res) => {
   }
 });
 
-postsRouter.put("/:postId", async (req, res) => {
+postsRouter.post("/", validatePostBody, async (req, res) => {
+  const { title, image, category_id, description, content, status_id } =
+    req.body;
+
+  try {
+    await pool.query(
+      `
+        INSERT INTO posts (
+          title,
+          image,
+          category_id,
+          description,
+          content,
+          status_id,
+          date,
+          likes_count
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, NOW(), 0)
+      `,
+      [title, image, category_id, description, content, status_id]
+    );
+
+    return res.status(201).json({
+      message: "Created post successfully",
+    });
+  } catch (error) {
+    console.error("Failed to create post:", error);
+    return res.status(500).json({
+      message: "Server could not create post because database connection",
+    });
+  }
+});
+
+postsRouter.put("/:postId", validatePostBody, async (req, res) => {
   const postId = Number(req.params.postId);
   const { title, image, category_id, description, content, status_id } =
     req.body;
