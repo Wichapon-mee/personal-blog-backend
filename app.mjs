@@ -1,8 +1,13 @@
 import express from "express";
 import cors from "cors";
+import dotenv from "dotenv";
+import pool from "./db.mjs";
+import postsRouter from "./routes/posts.mjs";
+
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4150;
+const PORT = process.env.PORT || 4000;
 
 app.use(express.json());
 
@@ -22,7 +27,18 @@ app.get("/health", (req, res) => {
   res.status(200).json({ message: "OK" });
 });
 
+app.use("/posts", postsRouter);
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+pool
+  .query("SELECT 1")
+  .then(() => {
+    console.log("Connected to PostgreSQL");
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to connect to PostgreSQL:", error.message);
+    console.error("Check DATABASE_URL in your .env file");
+    process.exit(1);
+  });
