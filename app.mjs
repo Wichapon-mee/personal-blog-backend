@@ -1,8 +1,11 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import pool from "./db.mjs";
+import connectionPool from "./utils/db.mjs";
 import postsRouter from "./routes/posts.mjs";
+import authRouter from "./routes/auth.mjs";
+import protectUser from "./middlewares/protectUser.mjs";
+import protectAdmin from "./middlewares/protectAdmin.mjs";
 
 dotenv.config();
 
@@ -28,8 +31,17 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/posts", postsRouter);
+app.use("/auth", authRouter);
 
-pool
+app.get("/protected-route", protectUser, (req, res) => {
+  res.json({ message: "This is protected content", user: req.user });
+});
+
+app.get("/admin-only", protectAdmin, (req, res) => {
+  res.json({ message: "This is admin-only content", admin: req.user });
+});
+
+connectionPool
   .query("SELECT 1")
   .then(() => {
     console.log("Connected to PostgreSQL");
@@ -39,6 +51,6 @@ pool
   })
   .catch((error) => {
     console.error("Failed to connect to PostgreSQL:", error.message);
-    console.error("Check DATABASE_URL in your .env file");
+    console.error("Check CONNECTION_STRING in your .env file");
     process.exit(1);
   });
