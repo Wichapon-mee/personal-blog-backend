@@ -1,6 +1,7 @@
 import { Router } from "express";
-import pool from "../db.mjs";
+import connectionPool from "../utils/db.mjs";
 import validatePostBody from "../middleware/validatePostBody.mjs";
+import protectUser from "../middlewares/protectUser.mjs";
 
 const postsRouter = Router();
 
@@ -36,7 +37,7 @@ postsRouter.get("/", async (req, res) => {
     conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
   try {
-    const countResult = await pool.query(
+    const countResult = await connectionPool.query(
       `
         SELECT COUNT(*)::int AS total
         FROM posts p
@@ -51,7 +52,7 @@ postsRouter.get("/", async (req, res) => {
     const totalPages = Math.ceil(totalPosts / limit);
     const nextPage = page < totalPages ? page + 1 : null;
 
-    const postsResult = await pool.query(
+    const postsResult = await connectionPool.query(
       `
         SELECT
           p.id,
@@ -99,7 +100,7 @@ postsRouter.get("/:postId", async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
+    const result = await connectionPool.query(
       `
         SELECT
           p.id,
@@ -110,7 +111,7 @@ postsRouter.get("/:postId", async (req, res) => {
           p.date,
           p.content,
           s.status,
-          p.likes_count
+          p.likes_count AS likes
         FROM posts p
         INNER JOIN categories c ON p.category_id = c.id
         INNER JOIN statuses s ON p.status_id = s.id
@@ -134,12 +135,193 @@ postsRouter.get("/:postId", async (req, res) => {
   }
 });
 
+postsRouter.get("/:postId/comments", async (req, res) => {
+  const postId = Number(req.params.postId);
+
+  if (!Number.isInteger(postId) || postId <= 0) {
+    return res.status(404).json({ message: "Server could not find a requested post" });
+  }
+
+  try {
+    const result = await connectionPool.query(
+      `
+        SELECT
+          cm.id,
+          cm.comment_text,
+          cm.created_at,
+          u.name,
+          u.username,
+          u.profile_pic
+        FROM comments cm
+        INNER JOIN users u ON cm.user_id = u.id
+        WHERE cm.post_id = $1
+        ORDER BY cm.created_at DESC
+      `,
+      [postId]
+    );
+
+    return res.status(200).json({ comments: result.rows });
+  } catch (error) {
+    console.error("Failed to fetch comments:", error);
+    return res.status(500).json({
+      message: "Server could not read comments because database connection",
+    });
+  }
+});
+
+postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
+  const postId = Number(req.params.postId);
+  const { comment } = req.body;
+  const userId = req.user.id;
+
+  if (!Number.isInteger(postId) || postId <= 0) {
+    return res.status(404).json({ message: "Server could not find a requested post" });
+  }
+
+  if (!comment || !String(comment).trim()) {
+    return res.status(400).json({ error: "Comment is required" });
+  }
+
+  try {
+    const postCheck = await connectionPool.query(
+      "SELECT id FROM posts WHERE id = $1",
+      [postId]
+    );
+
+    if (postCheck.rowCount === 0) {
+      return res.status(404).json({ message: "Server could not find a requested post" });
+    }
+
+    const result = await connectionPool.query(
+      `
+        INSERT INTO comments (post_id, user_id, comment_text, created_at)
+        VALUES ($1, $2, $3, NOW())
+        RETURNING id, comment_text, created_at
+      `,
+      [postId, userId, String(comment).trim()]
+    );
+
+    const userResult = await connectionPool.query(
+      "SELECT name, username, profile_pic FROM users WHERE id = $1",
+      [userId]
+    );
+
+    return res.status(201).json({
+      message: "Comment created successfully",
+      comment: {
+        ...result.rows[0],
+        ...userResult.rows[0],
+      },
+    });
+  } catch (error) {
+    console.error("Failed to create comment:", error);
+    return res.status(500).json({
+      message: "Server could not create comment because database connection",
+    });
+  }
+});
+
+postsRouter.post("/:postId/like", protectUser, async (req, res) => {
+  const postId = Number(req.params.postId);
+  const userId = req.user.id;
+
+  if (!Number.isInteger(postId) || postId <= 0) {
+    return res.status(404).json({ message: "Server could not find a requested post" });
+  }
+
+  try {
+    const postCheck = await connectionPool.query(
+      "SELECT id, likes_count FROM posts WHERE id = $1",
+      [postId]
+    );
+
+    if (postCheck.rowCount === 0) {
+      return res.status(404).json({ message: "Server could not find a requested post" });
+    }
+
+    const existingLike = await connectionPool.query(
+      "SELECT id FROM likes WHERE post_id = $1 AND user_id = $2",
+      [postId, userId]
+    );
+
+    if (existingLike.rowCount > 0) {
+      await connectionPool.query(
+        "DELETE FROM likes WHERE post_id = $1 AND user_id = $2",
+        [postId, userId]
+      );
+      await connectionPool.query(
+        "UPDATE posts SET likes_count = GREATEST(likes_count - 1, 0) WHERE id = $1",
+        [postId]
+      );
+
+      const updated = await connectionPool.query(
+        "SELECT likes_count AS likes FROM posts WHERE id = $1",
+        [postId]
+      );
+
+      return res.status(200).json({
+        message: "Post unliked successfully",
+        liked: false,
+        likes: updated.rows[0].likes,
+      });
+    }
+
+    await connectionPool.query(
+      "INSERT INTO likes (post_id, user_id, liked_at) VALUES ($1, $2, NOW())",
+      [postId, userId]
+    );
+    await connectionPool.query(
+      "UPDATE posts SET likes_count = likes_count + 1 WHERE id = $1",
+      [postId]
+    );
+
+    const updated = await connectionPool.query(
+      "SELECT likes_count AS likes FROM posts WHERE id = $1",
+      [postId]
+    );
+
+    return res.status(200).json({
+      message: "Post liked successfully",
+      liked: true,
+      likes: updated.rows[0].likes,
+    });
+  } catch (error) {
+    console.error("Failed to toggle like:", error);
+    return res.status(500).json({
+      message: "Server could not update like because database connection",
+    });
+  }
+});
+
+postsRouter.get("/:postId/like", protectUser, async (req, res) => {
+  const postId = Number(req.params.postId);
+  const userId = req.user.id;
+
+  if (!Number.isInteger(postId) || postId <= 0) {
+    return res.status(404).json({ message: "Server could not find a requested post" });
+  }
+
+  try {
+    const result = await connectionPool.query(
+      "SELECT id FROM likes WHERE post_id = $1 AND user_id = $2",
+      [postId, userId]
+    );
+
+    return res.status(200).json({ liked: result.rowCount > 0 });
+  } catch (error) {
+    console.error("Failed to fetch like status:", error);
+    return res.status(500).json({
+      message: "Server could not read like status because database connection",
+    });
+  }
+});
+
 postsRouter.post("/", validatePostBody, async (req, res) => {
   const { title, image, category_id, description, content, status_id } =
     req.body;
 
   try {
-    await pool.query(
+    await connectionPool.query(
       `
         INSERT INTO posts (
           title,
@@ -179,7 +361,7 @@ postsRouter.put("/:postId", validatePostBody, async (req, res) => {
   }
 
   try {
-    const existingPost = await pool.query(
+    const existingPost = await connectionPool.query(
       "SELECT id FROM posts WHERE id = $1",
       [postId]
     );
@@ -190,7 +372,7 @@ postsRouter.put("/:postId", validatePostBody, async (req, res) => {
       });
     }
 
-    await pool.query(
+    await connectionPool.query(
       `
         UPDATE posts
         SET
@@ -226,7 +408,7 @@ postsRouter.delete("/:postId", async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
+    const result = await connectionPool.query(
       "DELETE FROM posts WHERE id = $1 RETURNING id",
       [postId]
     );
