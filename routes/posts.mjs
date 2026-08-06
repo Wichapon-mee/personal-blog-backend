@@ -2,6 +2,8 @@ import { Router } from "express";
 import connectionPool from "../utils/db.mjs";
 import validatePostBody from "../middleware/validatePostBody.mjs";
 import protectUser from "../middlewares/protectUser.mjs";
+import protectAdmin from "../middlewares/protectAdmin.mjs";
+import { createNotification } from "../utils/notifications.mjs";
 
 const postsRouter = Router();
 
@@ -10,6 +12,7 @@ postsRouter.get("/", async (req, res) => {
   const limit = Math.max(1, Number(req.query.limit) || 6);
   const category = req.query.category || null;
   const keyword = req.query.keyword || null;
+  const status = req.query.status || null;
   const offset = (page - 1) * limit;
 
   const conditions = [];
@@ -31,6 +34,12 @@ postsRouter.get("/", async (req, res) => {
     )`);
     values.push(keywordPattern, keywordPattern, keywordPattern);
     paramIndex += 3;
+  }
+
+  if (status) {
+    conditions.push(`s.status = $${paramIndex}`);
+    values.push(status.toLowerCase());
+    paramIndex++;
   }
 
   const whereClause =
@@ -63,7 +72,8 @@ postsRouter.get("/", async (req, res) => {
           NULL AS author,
           p.date,
           p.likes_count AS likes,
-          p.content
+          p.content,
+          s.status
         FROM posts p
         INNER JOIN categories c ON p.category_id = c.id
         INNER JOIN statuses s ON p.status_id = s.id
@@ -184,13 +194,15 @@ postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
 
   try {
     const postCheck = await connectionPool.query(
-      "SELECT id FROM posts WHERE id = $1",
+      "SELECT id, title FROM posts WHERE id = $1",
       [postId]
     );
 
     if (postCheck.rowCount === 0) {
       return res.status(404).json({ message: "Server could not find a requested post" });
     }
+
+    const postTitle = postCheck.rows[0].title;
 
     const result = await connectionPool.query(
       `
@@ -205,6 +217,14 @@ postsRouter.post("/:postId/comments", protectUser, async (req, res) => {
       "SELECT name, username, profile_pic FROM users WHERE id = $1",
       [userId]
     );
+
+    await createNotification({
+      type: "comment",
+      actorUserId: userId,
+      postId,
+      message: `Commented on "${postTitle}".`,
+      link: `/post/${postId}`,
+    });
 
     return res.status(201).json({
       message: "Comment created successfully",
@@ -316,43 +336,11 @@ postsRouter.get("/:postId/like", protectUser, async (req, res) => {
   }
 });
 
-postsRouter.post("/", validatePostBody, async (req, res) => {
-  const { title, image, category_id, description, content, status_id } =
-    req.body;
-
-  try {
-    await connectionPool.query(
-      `
-        INSERT INTO posts (
-          title,
-          image,
-          category_id,
-          description,
-          content,
-          status_id,
-          date,
-          likes_count
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, NOW(), 0)
-      `,
-      [title, image, category_id, description, content, status_id]
-    );
-
-    return res.status(201).json({
-      message: "Created post successfully",
-    });
-  } catch (error) {
-    console.error("Failed to create post:", error);
-    return res.status(500).json({
-      message: "Server could not create post because database connection",
-    });
-  }
-});
-
-postsRouter.put("/:postId", validatePostBody, async (req, res) => {
+postsRouter.put("/:postId", protectAdmin, validatePostBody, async (req, res) => {
   const postId = Number(req.params.postId);
   const { title, image, category_id, description, content, status_id } =
     req.body;
+  const actorUserId = req.user.id;
 
   if (!Number.isInteger(postId) || postId <= 0) {
     return res.status(404).json({
@@ -387,6 +375,18 @@ postsRouter.put("/:postId", validatePostBody, async (req, res) => {
       [title, image, category_id, description, content, status_id, postId]
     );
 
+    const isDraft = Number(status_id) === 1;
+
+    await createNotification({
+      type: isDraft ? "article_updated_draft" : "article_updated",
+      actorUserId,
+      postId,
+      message: isDraft
+        ? `Updated draft article "${title}".`
+        : `Updated published article "${title}".`,
+      link: `/admin/articles/${postId}/edit`,
+    });
+
     return res.status(200).json({
       message: "Updated post sucessfully",
     });
@@ -398,7 +398,7 @@ postsRouter.put("/:postId", validatePostBody, async (req, res) => {
   }
 });
 
-postsRouter.delete("/:postId", async (req, res) => {
+postsRouter.delete("/:postId", protectAdmin, async (req, res) => {
   const postId = Number(req.params.postId);
 
   if (!Number.isInteger(postId) || postId <= 0) {
