@@ -12,6 +12,11 @@ export async function ensureNotificationsTable() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  await connectionPool.query(`
+    ALTER TABLE notifications
+    ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE
+  `);
 }
 
 export async function createNotification({
